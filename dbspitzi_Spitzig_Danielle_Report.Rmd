@@ -1,0 +1,488 @@
+---
+title: "dbspitzi_Spitzig_Danielle_Report"
+author: "Danielle Spitzig"
+date: "August 8, 2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(car)
+library(MASS)
+library(lars)
+library(glmnet)
+library(expandFunctions)
+library(pls)
+library(bootstrap)
+```
+
+
+```{r read in data, echo=FALSE}
+#Read in the data
+bohr = read.csv("C:/Users/danie/Documents/R/roboBohr.csv", header = T)
+```
+
+```{r , echo=FALSE}
+#Need to remove X (index number), and pubchem_id
+drops = c("X", "pubchem_id")
+Data = bohr[ , !(names(bohr) %in% drops)]
+```
+
+```{r}
+#plot the reponse variable just to see what everything looks like
+hist(Data$Eat, breaks=25, probability = TRUE, col='grey', xlab = "Atomic Energy (EA)",
+     main = "Atomic Energy Distribution", xlim=c(-25,0))
+lines(density(Data$Eat), col='darkgreen', lwd=3)
+
+```
+
+
+```{r}
+#So there are no NA values, but the dataframe is padded with zeros (placeholder NA) - let's see how many in each column
+check = c()
+for (i in 1:ncol(Data)){
+  check[i] = sum(Data[[i]]==0)
+}
+```
+
+```{r}
+#For columns that have more 0s than non-0s, we'll drop them now
+drop.col = which(check >(nrow(Data)/2))
+new_data = Data[-drop.col]
+```
+
+```{r}
+#Check which rows still have 0's and now we're going to get rid of those
+row.keep = c()
+for (i in 1:nrow(new_data)){
+  row.keep[i] = sum(new_data[i,]==0)
+}
+dif.row = which(row.keep > 0)
+```
+
+```{r}
+#Remove the Y and mean-center - we don't want to divide by variance here
+Y = scale(new_data$Eat, scale=FALSE)
+new_data = new_data[-326]
+#Drop rows with 0 (i.e. NA posed as 0)
+#Add back the response variable as well
+mole = as.data.frame(scale(new_data[-dif.row, ]))
+mole$Eat = Y[-dif.row,]
+dropped = new_data[dif.row, ]
+dropped$Eat = Y[dif.row, ]
+
+
+```
+
+
+```{r}
+#Look at scaled variables and also the unscaled ones that we're throwing away
+#Hist of response variable for the samples we're throwing away for their missing values
+hist(dropped$Eat, breaks=25, probability = TRUE, col='grey', xlab = "Atomic Energy (EA)",
+     main = "Atomic Energy Distribution")
+lines(density(dropped$Eat), col='darkgreen', lwd=3)
+```
+
+The smaller molecules typically have smaller energy (Recall in chemistry, the amount of energy is the absolute value and the sign just determines whether E is lost or gained). This makes sense as there are fewer atoms that bond together to form these molecules, so less E is lost during the process.
+
+```{r}
+#Can't look at all of the data left even, so once again we'll look at EAT of our new scaled data
+hist(mole$Eat, breaks=25, probability = TRUE, col='grey', xlab = "Atomic Energy (EA)",
+     main = "Atomic Energy Distribution")
+lines(density(mole$Eat), col='darkgreen', lwd=3)
+```
+
+```{r}
+#Let's take 5 random variables from X and plot them against each other and Y, just to see some of what the data looks like
+set.seed(4444)
+rand = mole[, sample(ncol(mole), 5)]
+rand$Y = mole$Eat
+plot(rand)
+```
+
+So some of these seem to have multicollinearity problems - we'll split the data and then run different models/methods to deal with it
+```{r}
+#Now let's split this into a test and training set
+#75%-25% train-test split
+smp_size = floor(0.75 * nrow(mole))
+
+set.seed(444)
+train_ind = sample(seq_len(nrow(mole)), size = smp_size)
+
+train = mole[train_ind, ]
+test = mole[-train_ind, ]
+```
+
+First method - variable selection using Forward selection
+```{r}
+#Let's just try a regular lm model on all variables and then run vif - how many variables are Not Good
+lm.model = lm(train$Eat~., data=train)
+
+sum(vif(lm.model) > 10)
+```
+
+Ouch, of our remaining 325 variables, VIF is saying to only select 13. So let's do a forward selection to get these 13 values and run a simple lm and see what we get for results
+
+```{r}
+glm.X = as.matrix(train[-326])
+glm.Y = train$Eat
+X.test = as.matrix(test[-326])
+Y.test = test$Eat
+```
+
+```{r}
+#Have large multicollinearity issues, let's try a few things!
+#Mainly subset selection techniques, and dimensionality reduction techniques
+set.seed(1313)
+model = lars(glm.X, glm.Y, type="stepwise", normalize = FALSE, max.steps = 13, trace=TRUE)
+
+```
+
+Nice, here are the 13 variables that forward seletion takes! Let's run these with lm so we can look at potential outliers
+```{r}
+#Use the variables from stepwise to get a reduced dataframe to run lm on
+var = c(307, 325, 308, 100, 318, 313, 195, 324, 316, 320, 311, 2, 235, 326)
+var.train = data.frame(train[, var])
+var.test = data.frame(test[,var])
+vif.model = lm(Eat~., data=var.train)
+summary(vif.model)
+```
+
+So most of the varaibles are indeed significant! Good start, let's see how it predicts. 
+
+But, before we go anywhere else, let's see if there are any outliers.
+
+Trying to find outliers in such a large multivariate data set such as this can be hard. If you declare an observation an outlier based on a single feature it could be possible that the feature chosen was unimportant. Hence, it is better to collectively look at all X features included in the model.
+```{r}
+#Use Cook's distance on lm to find outliers
+cooksd = cooks.distance(vif.model)
+plot(cooksd, pch="*", cex=2, main="Influential Obs by Cooks distance")  # plot cook's distance
+abline(h = 100*mean(cooksd, na.rm=T), col="red")  # add cutoff line
+text(x=1:length(cooksd)+1, y=cooksd, labels=ifelse(cooksd>100*mean(cooksd, na.rm=T),names(cooksd),""), col="red")  # add labels
+```
+
+The points in red above the cut-off can be classified as influential. Let's look at these points.
+
+```{r}
+#Just find these points and look at them
+influential <- (names(cooksd)[(cooksd > 100*mean(cooksd, na.rm=T))])  # influential row numbers
+var.train[influential, ]
+```
+So there's only about 8 outliers here - let's see what this means for our results out of the thousands of data points.
+
+Let's predict our test set and see what that looks like - we'll do the mean squared error, mean absolute error, and plot Y vs $\hat Y$ as well.
+
+```{r}
+#Predict test values with model we trained above
+vif.pred = predict(vif.model, newdata = var.test[-14])
+cat("The MSE is:", mean((vif.pred - var.test$Eat)^2))
+cat("\nThe MAE is:", mean(abs(vif.pred - var.test$Eat)))
+```
+
+```{r}
+#Plot fitted vs true Y values
+yyHatPlot(var.test$Eat, vif.pred, ylab= "Predicted Y", xlab="Actual Y", main="Linear Model - Y vs YHat")
+```
+
+How do the error terms look?
+
+```{r}
+#Plot residuals
+err = vif.pred-var.test$Eat
+plot(vif.pred, err, xlab="Fitted Values", ylab="Residuals", main="Residuals vs Fitted Values")
+abline(h=0, col="red")
+```
+So the residual plot doesn't seem to be very well behaved. Mainly there does seem to a hirixontal tread near the This could be due to a few things - 
+```{r}
+#Hist of absolute residuals
+hist(abs(vif.pred-var.test$Eat), probability = TRUE, xlab="Error Values", main="Histogram of Error Values", xlim=c(0,5))
+```
+Okay, so the absolute values of our errors aren't too bad.  
+
+Still, some of these data points are pretty influential ... let's look into doing a robust regression on some this reduced dataset.
+
+```{r}
+#Keep huber defualt and see if it helps
+huber.model = rlm(Eat~., data=var.train)
+
+summary(huber.model)
+```
+So most of the varaibles seem similar to the regular lm, interesting. Let's see how it predicts. 
+
+```{r}
+huber.pred = predict(huber.model, newdata = var.test[-14])
+cat("The MSE is:", mean((huber.pred - var.test$Eat)^2))
+cat("\nThe MAE is:", mean(abs(huber.pred - var.test$Eat)))
+```
+About the same as our non-robust lm ... Let's see if the plots looks better.
+
+```{r}
+yyHatPlot(var.test$Eat, huber.pred, ylab= "Predicted Y", xlab="Actual Y", main="Huber Model - Y vs YHat")
+```
+Okay, so this looks about the same as before. Let's try Lasso subset selection techniques now and see what happens.
+But first, how do the error terms look?
+
+```{r}
+err = huber.pred-var.test$Eat
+plot(huber.pred, err, xlab="Fitted Values", ylab="Residuals", main="Residuals vs Fitted Values")
+abline(h=0, col="red")
+```
+
+```{r}
+hist(abs(huber.pred-var.test$Eat), probability = TRUE, xlab="Error Values", main="Histogram of Error Values", xlim=c(0,5))
+```
+Very very similar to the linear model. Seems that the outliers didn't have much of an effect on the model afterall.
+
+Let's see if we can do better with a Lasso for subset selection and PCR and PPR, dimensionality reduction methods.
+
+```{r}
+#Lasso needs data as matrices
+glm.X = as.matrix(train[-326])
+glm.Y = train$Eat
+X.test = as.matrix(test[-326])
+Y.test = test$Eat
+```
+
+```{r}
+#Let's do some CV to get the best lambda values - doing Lasso for subset selection
+set.seed(444)
+lasso.cv = cv.glmnet(glm.X, glm.Y, alpha=1)
+cat("The best lambda was found to be : ", lasso.cv$lambda.1se)
+
+```
+Fairly small lambda value - let's see how this model predicts.
+
+```{r}
+lasso.model = glmnet(glm.X,glm.Y,lambda=lasso.cv$lambda.1se)
+```
+
+```{r}
+cat("Lasso drops", sum(lasso.model$beta == 0), "variables.")
+cat("\nThere are another", sum(lasso.model$beta < 0.000001 & lasso.model$beta != 0), "variables under 10e-6")
+```
+So there are only 57 variables, and of those there are only 25 that have values larger than 10e-6.
+
+```{r}
+lasso.pred = predict(lasso.model, newx = X.test)
+cat("The MSE is:", mean((lasso.pred - Y.test)^2))
+cat("\nThe MAE is:", mean(abs(lasso.pred - Y.test)))
+```
+Oh, this looks better than the lm and Huber errors. Let's see how the plots look.
+
+```{r}
+yyHatPlot(Y.test, lasso.pred, ylab= "Predicted Y", xlab="Actual Y", main="Lasso - Y vs YHat")
+```
+This has a slightly better MSE and MAE from the subset chosen from forward select, and modeling the predicted Y values just further shows how similar they are. Let's look at a histogram of the errors as well.
+
+```{r}
+err = lasso.pred-Y.test
+plot(lasso.pred, err, xlab="Fitted Values", ylab="Residuals", main="Residuals vs Fitted Values")
+abline(h=0, col="red")
+```
+
+```{r}
+hist(abs(lasso.pred-Y.test), probability = TRUE, xlab="Error Values", main="Histogram of Error Values", xlim=c(0,5))
+```
+Looking at everything, it's obvious to see that Lasso and Forward Selection linear modeling do very well and very similar. Now let's try PCR and PPR see what happens.
+
+
+```{r}
+set.seed(4444)
+
+pcr.model = pcr(Eat~., data = train, ncomp = 20, validation = "CV")
+summary(pcr.model)
+```
+Okay, so the predictors hit about 95% around 8 components, but the response variable doesn't hit 95%. Let's try 8 and 13 components and see what we get.
+
+```{r}
+validationplot(pcr.model, val.type = "MSEP")
+```
+Seems like 8 and 13 are decent choices, let's try them!
+
+Let's PCR with 8 components first.
+
+```{r}
+pcr.8 = pcr(Eat~., data = train, ncomp = 8, validation = "none")
+pred.8 = predict(pcr.8, test[-326], ncomp=8)
+```
+
+```{r}
+cat("The MSE is:", mean((pred.8 - test$Eat)^2))
+cat("\nThe MAE is:", mean(abs(pred.8 - test$Eat)))
+```
+Looks alright, but not as good as Lasso even now.
+```{r}
+yyHatPlot(test$Eat, pred.8, ylab= "Predicted Y", xlab="Actual Y", main="PCR 8 comp. - Y vs YHat")
+```
+Okay, this looks very similar to Lasso now, so that's good. Last check, the histogram of errors.
+
+```{r}
+err = pred.8-test$Eat
+plot(pred.8, err, xlab="Fitted Values", ylab="Residuals", main="Residuals vs Fitted Values")
+abline(h=0, col="red")
+```
+Okay, back to things looking like before. Maybe that's the best we can do?
+
+```{r}
+hist(abs(pred.8-test$Eat), probability = TRUE, xlab="Error Values", main="Histogram of Error Values", xlim=c(0,5))
+```
+
+Time to do 13 components
+```{r}
+pcr.13 = pcr(Eat~., data = train, ncomp = 13, validation = "none")
+pred.13 = predict(pcr.13, test[-326], ncomp=13)
+```
+
+```{r}
+cat("The MSE is:", mean((pred.13 - test$Eat)^2))
+cat("\nThe MAE is:", mean(abs(pred.13 - test$Eat)))
+```
+This is pretty good, better than 8 components! Let's do some modeling just to check.
+```{r}
+yyHatPlot(test$Eat, pred.13, ylab= "Predicted Y", xlab="Actual Y", main="PCR 13 comp. - Y vs YHat")
+```
+Look's about the same as the other methods. Let's look at the histogram as well.
+
+```{r}
+err = pred.13-test$Eat
+plot(pred.13, err, xlab="Fitted Values", ylab="Residuals", main="Residuals vs Fitted Values")
+abline(h=0, col="red")
+```
+Yeah, even the residuals plot is the same.
+
+```{r}
+hist(abs(pred.13-test$Eat), probability = TRUE, xlab="Error Values", main="Histogram of Error Values", xlim=c(0,5))
+```
+
+Looks good! Let's look at one more dimensionality reduction technique - PPR.
+
+```{r}
+#Let's see how many terms we should include in the model - let's make our own CV functions to do this - default is 10fold
+
+#Uses crossval in bootstrap to run
+pprCV <- function(x, y, theta.fit, theta.predict, ngroup=10) {
+  require(bootstrap)
+  results = crossval(x,y,theta.fit, theta.predict, ngroup=ngroup)
+  cv = mean((y - results$cv.fit)^2)
+  cv
+}
+#Default nterm is k which will be a global varaible
+ppr.fit <- function(x,y, nterm=k, bass=0){
+  ppr(x,y,nterms=nterm,bass=bass)
+}
+
+ppr.predict <- function(fit,x){
+  predict(fit, newdata = x)
+  }
+```
+
+```{r}
+#CV for number of terms first - can run CV for bass (controls smoothing of the supsmu - larger means more smoothing)
+#Often don't need more than a few, let's see where 5 gets us and go from there
+set.seed(9090)
+CV.nterm = data.frame(n.comp=NA, CV=NA)
+rep = c(1,2,3,4)
+
+for (k in rep){
+  cv.comp = pprCV(glm.X, glm.Y, ppr.fit, ppr.predict, 10)
+  CV.nterm[k,] = c(k, mean(cv.comp))
+}
+```
+
+```{r}
+CV.nterm
+```
+Interesting, it seems the MSE for the training data is lowest with just 1 component in PPR. That makes things easier! Let's run the CV code one more time, but this time to find an optimal bass value
+
+
+
+```{r}
+ppr.bass <- function(x,y,nterm=1,bass=k){
+  ppr(x,y,nterms = nterm, bass = bass)
+}
+```
+
+```{r}
+set.seed(9090)
+CV.bass = data.frame(bass=NA, CV=NA)
+rep = seq(0,10,1)
+
+for (k in rep){
+  cv.comp = pprCV(glm.X, glm.Y, ppr.bass, ppr.predict, 10)
+  print(k)
+  CV.bass[k+1,] = c(k, mean(cv.comp))
+}
+```
+
+```{r}
+CV.bass
+```
+Okay nice, bass does best for 0, which is the default. 
+
+Last CV, let's check for the optimal span value
+
+```{r}
+ppr.span <- function(x,y,nterm=1,bass=0, span=k){
+  ppr(x,y,nterms = nterm, bass = bass, span=k)
+}
+```
+
+```{r}
+set.seed(9090)
+CV.span = data.frame(span=NA, CV=NA)
+rep = seq(0,0.75,0.25)
+
+for (k in rep){
+  cv.comp = pprCV(glm.X, glm.Y, ppr.span, ppr.predict, 10)
+  print(k)
+  j = 1 + k*4
+  CV.span[j,] = c(k, mean(cv.comp))
+}
+```
+
+```{r}
+CV.span
+```
+Nice nice, looking at the default span as well!
+
+Now, let's build the model with these parameters.
+
+```{r}
+ppr.model = ppr(glm.X, glm.Y, nterm=1)
+```
+
+Alpha are the projection directions, lets see how many are positive and negative for the 300+ varaibles!
+```{r}
+sum(ppr.model$alpha > 0)
+sum(ppr.model$alpha < 0)
+```
+And let's look at the coefficient for this one component.
+
+```{r}
+ppr.model$beta
+```
+
+Pretty close to 2.5.
+```{r}
+ppr.pred = predict(ppr.model, newdata = X.test)
+cat("The MSE is:", mean((ppr.pred - Y.test)^2))
+cat("\nThe MAE is:", mean(abs(ppr.pred - Y.test)))
+```
+Oh, this looks even better than the Lasso errors! That's promising, let's see how the plots look.
+
+```{r}
+yyHatPlot(Y.test, ppr.pred, ylab= "Predicted Y", xlab="Actual Y", main="PPR - Y vs YHat")
+```
+This has a slightly better MSE and MAE from all other methods, and modeling the predicted Y values just further shows this! The PPR doesn't seem to suffer from the same outliers that showed up in the other methods. Let's look at a histogram of the errors as well.
+
+```{r}
+err = ppr.pred-Y.test
+plot(ppr.pred, err, xlab="Fitted Values", ylab="Residuals", main="Residuals vs Fitted Values")
+abline(h=0, col="red")
+```
+Now that's more like it! Seems to be that the assumptions of linearity truly hold under PPR.
+
+```{r}
+hist(abs(ppr.pred-Y.test), probability = TRUE, xlab="Error Values", main="Histogram of Error Values", xlim=c(0,5))
+```
+Definitelt the best of the histogram values as well! This is a very promising method for dealing with dimensionality reduction and the issues that you can run into with data that has so many varaibles.
